@@ -144,17 +144,7 @@ REQUEST_TIMEOUT_HTTP = 5
 REQUEST_TIMEOUT_SMTP = 5
 THREAD_COUNT_DEFAULT = min(32, os.cpu_count() + 4)
 
-if sys.platform != 'win32' and sys.stdout.isatty():
-	FG_RND = '\x1b[3{}m'.format(int(time.time())%8+1)
-	FG_YEL = '\x1b[33m'
-	FG_CYA = '\x1b[36m'
-	FG_BLU = '\x1b[34m'
-	FG_RST = '\x1b[39m'
-	ST_BRI = '\x1b[1m'
-	ST_CLR = '\x1b[1K'
-	ST_RST = '\x1b[0m'
-else:
-	FG_RND = FG_YEL = FG_CYA = FG_BLU = FG_RST = ST_BRI = ST_CLR = ST_RST = ''
+FG_RND = FG_YEL = FG_CYA = FG_BLU = FG_RST = ST_BRI = ST_CLR = ST_RST = ''
 
 devnull = os.devnull
 
