@@ -25,7 +25,7 @@ limitations under the License.
 '''
 
 __author__ = 'Marcin Ulikowski'
-__version__ = '20230918'
+__version__ = '20240116'
 __email__ = 'marcin@ulikowski.pl'
 
 import re
@@ -282,8 +282,8 @@ class UrlOpener():
 	def _normalize(self):
 		content = b' '.join(self.content.split())
 		mapping = dict({
-			b'(action|src|href)="[^"]+"': lambda m: m.group(0).split(b'=')[0] + b'=""',
-			b'url\([^)]+\)': b'url()',
+			b'(action|src|href)=".+"': lambda m: m.group(0).split(b'=')[0] + b'=""',
+			b'url(.+)': b'url()',
 			})
 		for pattern, repl in mapping.items():
 			content = re.sub(pattern, repl, content, flags=re.IGNORECASE)
@@ -294,7 +294,7 @@ class UrlParser():
 	def __init__(self, url):
 		if not url:
 			raise TypeError('argument has to be non-empty string')
-		u = urllib.parse.urlparse(url if '://' in url else 'http://{}'.format(url))
+		u = urllib.parse.urlparse(url if '://' in url else '//' + url, scheme='http')
 		self.scheme = u.scheme.lower()
 		if self.scheme not in ('http', 'https'):
 			raise ValueError('invalid scheme') from None
@@ -313,7 +313,7 @@ class UrlParser():
 		self.fragment = u.fragment
 
 	def _validate_domain(self, domain):
-		if 1 > len(domain) > 253:
+		if len(domain) < 1 or len(domain) > 253:
 			return False
 		if VALID_FQDN_REGEX.match(domain):
 			try:
@@ -351,10 +351,12 @@ class Permutation(dict):
 
 	__setattr__ = dict.__setitem__
 
-	def __init__(self, fuzzer='', domain=''):
+	def __init__(self, **kwargs):
 		super(dict, self).__init__()
-		self['fuzzer'] = fuzzer
-		self['domain'] = domain
+		self['fuzzer'] = kwargs.pop('fuzzer', '')
+		self['domain'] = kwargs.pop('domain', '')
+		for k, v in kwargs.items():
+			self[k] = v
 
 	def __hash__(self):
 		return hash(self['domain'])
@@ -363,10 +365,18 @@ class Permutation(dict):
 		return self['domain'] == other['domain']
 
 	def __lt__(self, other):
-		return self['fuzzer'] + ''.join(self.get('dns_a', [])[:1]) + self['domain'] < other['fuzzer'] + ''.join(other.get('dns_a', [])[:1]) + other['domain']
+		if self['fuzzer'] == other['fuzzer']:
+			if len(self) > 2 and len(other) > 2:
+				return self.get('dns_a', [''])[0] + self['domain'] < other.get('dns_a', [''])[0] + other['domain']
+			else:
+				return self['domain'] < other['domain']
+		return self['fuzzer'] < other['fuzzer']
 
 	def is_registered(self):
 		return len(self) > 2
+
+	def copy(self):
+		return Permutation(**self)
 
 
 class pHash():
@@ -435,6 +445,10 @@ class HeadlessBrowser():
 		chrome_options = webdriver.ChromeOptions()
 		for opt in self.WEBDRIVER_ARGUMENTS:
 			chrome_options.add_argument(opt)
+		proxies = urllib.request.getproxies()
+		if proxies:
+			proxy_string = ';'.join(['{}={}'.format(scheme, url) for scheme, url in proxies.items()])
+			chrome_options.add_argument('--proxy-server={}'.format(proxy_string))
 		chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
 		chrome_options.add_experimental_option('useAutomationExtension', False)
 		self.driver = webdriver.Chrome(options=chrome_options)
@@ -651,6 +665,12 @@ class Fuzzer():
 		self.tld_dictionary = list(tld_dictionary)
 		self.domains = set()
 
+	def __enter__(self):
+		return self
+
+	def __exit__(self, exc_type, exc_val, exc_tb):
+		return
+
 	def _bitsquatting(self):
 		masks = [1, 2, 4, 8, 16, 32, 64, 128]
 		chars = set('abcdefghijklmnopqrstuvwxyz0123456789-')
@@ -692,7 +712,7 @@ class Fuzzer():
 
 	def _insertion(self):
 		result = set()
-		for i in range(1, len(self.domain)-1):
+		for i in range(0, len(self.domain)-1):
 			prefix, orig_c, suffix = self.domain[:i], self.domain[i], self.domain[i+1:]
 			for c in (c for keys in self.keyboards for c in keys.get(orig_c, [])):
 				result.update({
@@ -730,6 +750,11 @@ class Fuzzer():
 				if self.domain[i] in vowels:
 					yield self.domain[:i] + vowel + self.domain[i+1:]
 
+	def _plural(self):
+		for i in range(2, len(self.domain)-2):
+			yield self.domain[:i+1] + ('es' if self.domain[i] in ('s', 'x', 'z') else 's') + self.domain[i+1:]
+
+
 	def _addition(self):
 		return {self.domain + chr(i) for i in (*range(48, 58), *range(97, 123))}
 
@@ -758,11 +783,12 @@ class Fuzzer():
 		return set(self.tld_dictionary)
 
 	def generate(self, fuzzers=[]):
+		self.domains = set()
 		if not fuzzers or '*original' in fuzzers:
 			self.domains.add(Permutation(fuzzer='*original', domain='.'.join(filter(None, [self.subdomain, self.domain, self.tld]))))
 		for f_name in fuzzers or [
 			'addition', 'bitsquatting', 'cyrillic', 'homoglyph', 'hyphenation',
-			'insertion', 'omission', 'repetition', 'replacement',
+			'insertion', 'omission', 'plural', 'repetition', 'replacement',
 			'subdomain', 'transposition', 'vowel-swap', 'dictionary',
 		]:
 			try:
@@ -799,18 +825,26 @@ class Fuzzer():
 			if not VALID_FQDN_REGEX.match(domain.get('domain')):
 				self.domains.discard(domain)
 
-	def permutations(self, registered=False, unregistered=False, dns_all=False):
-		if (registered == False and unregistered == False) or (registered == True and unregistered == True):
-			domains = self.domains.copy()
-		elif registered == True:
-			domains = set({x for x in self.domains.copy() if x.is_registered()})
-		elif unregistered == True:
-			domains = set({x for x in self.domains.copy() if not x.is_registered()})
+	def permutations(self, registered=False, unregistered=False, dns_all=False, unicode=False):
+		if (registered and not unregistered):
+			domains = [x.copy() for x in self.domains if x.is_registered()]
+		elif (unregistered and not registered):
+			domains = [x.copy() for x in self.domains if not x.is_registered()]
+		else:
+			domains = [x.copy() for x in self.domains]
 		if not dns_all:
-			for domain in domains:
-				for k in ('dns_ns', 'dns_a', 'dns_aaaa', 'dns_mx'):
-					if k in domain:
-						domain[k] = domain[k][:1]
+			def _cutdns(x):
+				if x.is_registered():
+					for k in ('dns_ns', 'dns_a', 'dns_aaaa', 'dns_mx'):
+						if k in x:
+							x[k] = x[k][:1]
+				return x
+			domains = map(_cutdns, domains)
+		if unicode:
+			def _punydecode(x):
+				x.domain = idna.decode(x.domain)
+				return x
+			domains = map(_punydecode, domains)
 		return sorted(domains)
 
 
@@ -1180,6 +1214,7 @@ def run(**kwargs):
 	parser.add_argument('--nameservers', type=str, metavar='LIST', help='DNS or DoH servers to query (separated with commas)')
 	parser.add_argument('--useragent', type=str, metavar='STRING', default=USER_AGENT_STRING,
 		help='Set User-Agent STRING (default: %s)' % USER_AGENT_STRING)
+	parser.add_argument('--version', action='version', version='dnstwist {}'.format(__version__), help=argparse.SUPPRESS)
 
 	if kwargs:
 		sys.argv = ['']
@@ -1234,7 +1269,7 @@ def run(**kwargs):
 		parser.error('argument --lsh-url requires --lsh')
 
 	if args.lsh and args.lsh not in ('ssdeep', 'tlsh'):
-		parser.error('invalid LSH algorithm (choose ssdeep or tlash)')
+		parser.error('invalid LSH algorithm (choose ssdeep or tlsh)')
 
 	if not args.phash:
 		if args.phash_url:
@@ -1255,6 +1290,13 @@ def run(**kwargs):
 			parser.error('argument --dictionary cannot be used with selected fuzzing algorithms (consider enabling fuzzer: dictionary)')
 		if args.tld and 'tld-swap' not in fuzzers:
 			parser.error('argument --tld cannot be used with selected fuzzing algorithms (consider enabling fuzzer: tld-swap)')
+		# important: this should enable all available fuzzers
+		with Fuzzer('example.domain', ['foo'], ['bar']) as fuzz:
+			fuzz.generate()
+			all_fuzzers = sorted({x.get('fuzzer') for x in fuzz.permutations()})
+			if not set(fuzzers).issubset(all_fuzzers):
+				parser.error('argument --fuzzers takes a comma-separated list with at least one of the following: {}'.format(' '.join(all_fuzzers)))
+			del all_fuzzers
 
 	nameservers = []
 	if args.nameservers:
@@ -1372,6 +1414,11 @@ r'''     _           _            _     _
  \__,_|_| |_|___/\__| \_/\_/ |_|___/\__| {%s}
 
 ''' % __version__ + FG_RST + ST_RST)
+
+	if args.lsh or args.phash:
+		proxies = urllib.request.getproxies()
+		if proxies:
+			p_cli('using proxy: {}\n'.format(' '.join(set(proxies.values()))))
 
 	lsh_init = str()
 	lsh_effective_url = str()
